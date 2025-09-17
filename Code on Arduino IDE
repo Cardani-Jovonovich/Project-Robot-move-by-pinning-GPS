@@ -1,0 +1,486 @@
+โค้ดการทำงานหุ่นยนต์เคลื่อนที่ด้วยการปักหมุดพิกัด GPS
+#include <AFMotor.h>
+#include "Wire.h"
+#include <QMC5883LCompass.h>
+#include <TinyGPS++.h>
+#define MAX_WAYPOINTS 5
+//****************************************************************************************  // ตั้งค่า GPS
+int GPS_Course;
+int Number_of_SATS;
+TinyGPSPlus gps;
+int current_wp = 0;
+int waypoint_loops = 1;
+//*****************************************************************************************AF_DCMotor motor1(1, MOTOR12_64KHZ);
+AF_DCMotor motor2(2, MOTOR12_64KHZ);
+AF_DCMotor motor3(3, MOTOR12_64KHZ);
+AF_DCMotor motor4(4, MOTOR12_64KHZ);
+int turn_Speed = 255;
+int mtr_Spd = 255;
+//*****************************************************************************************// คำสั่งเรียกใช้และการตั้งค่าโมดูลเข็มทิศ
+QMC5883LCompass compass;
+int16_t mx, my, mz;
+int desired_heading;
+int compass_heading;
+int compass_dev = 5;
+int Heading_A;
+int Heading_B;
+int pass = 0;
+//*****************************************************************************************// ตั้งค่าบลูทูธ
+String str;
+int blueToothVal;
+//*****************************************************************************************// ตั้งค่าตัวนับพิกัดและประกาศตัวแปร
+unsigned long Distance_To_WP;
+int wpCount = 0;
+double WP_LATarray[MAX_WAYPOINTS];
+double WP_LONarray[MAX_WAYPOINTS];
+//*****************************************************************************************void setup() {
+  Serial.begin(115200);
+  Serial1.begin(9600);
+  Serial2.begin(9600);
+  Wire.begin();
+  compass.init();
+  compass.setCalibrationOffsets(-302, -504, 0);
+}
+
+int angleDiff(int target, int current) {
+  int diff = (target - current + 540) % 360 - 180;
+  return diff;
+}
+
+void bluetooth() {
+  while (Serial1.available()) {
+    str = Serial1.readStringUntil('\n');
+    Serial.print(str);
+
+  if (str.startsWith("LOOP:")) {
+    int loops = str.substring(5).toInt();
+    setWaypointLoops(loops);
+    continue;
+  }
+  str.trim();
+  if (str.startsWith("WAYPOINT: ")){
+    String latlon = str.substring(10);
+    AddWaypoint(latlon);
+    continue;
+  }
+
+    blueToothVal = str.toInt();
+    Serial.print(" BlueTooth Value ");
+    Serial.println(blueToothVal);
+
+    switch (blueToothVal) {
+      case 1:
+        Serial1.println("Forward");
+        Forward();
+        break;
+      case 2:
+        Serial1.println("Backward");
+        Backward();
+        break;
+      case 3:
+        Serial1.println("Left");
+        LeftTurn();
+        break;
+      case 33:
+        StopCar();
+        break;
+      case 4:
+        Serial1.println("Right");
+        RightTurn();
+        break;
+      case 44:
+        StopCar();
+        break;
+      case 5:
+        Serial1.println("Stop");
+        StopCar();
+        break;
+      case 6:
+        Serial1.println("Set Waypoint");
+        setWaypoint();
+        break;
+      case 7:
+        Serial1.println("Go To Waypoint");
+        goWaypoint();
+        break;
+      case 8:
+        Serial1.println("Turn Around");
+        turnAround();
+        break;
+      case 9:
+        Serial1.println("เช็คค่า Heading");
+        setHeading();
+        break;
+      case 10:
+        Serial1.println("ข้อมูลพิกัด GPS");
+        gpsInfo();
+        break;
+      case 11:
+        Serial1.println("เลี้ยวขวา 90 องศา");
+        CompassTurnRight();
+        break;
+      case 12:
+        Serial1.println("เลี้ยวซ้าย 90 องศา");
+        CompassTurnLeft();
+        break;
+      case 13:
+        Serial1.println("ล้างค่าพิกัด");
+        clearWaypoints();
+        break;
+    }
+  }
+}
+
+void getGPS() {
+  while (Serial2.available() > 0) {
+    gps.encode(Serial2.read());
+  }
+}
+
+void setWaypoint() {
+  if (wpCount < MAX_WAYPOINTS) {
+    double sumLat = 0, sumLon = 0;
+    int validCount = 0;
+    for (int i = 0; i < 10; i++) {
+      getGPS();
+      if (gps.location.isValid()) {
+        sumLat += gps.location.lat();
+        sumLon += gps.location.lng();
+        validCount++;
+      }
+      delay(300);
+    }
+    if (validCount > 0) {
+      WP_LATarray[wpCount] = sumLat / validCount;
+      WP_LONarray[wpCount] = sumLon / validCount;
+      wpCount++;
+      Serial1.print("บันทึก Waypoint ด้วยค่าเฉลี่ย");
+      Serial1.print(validCount);
+      Serial1.println(" ครั้ง");
+    } else {
+      Serial1.println("สัญญาณ GPS ไม่ถูกต้อง");
+    }
+  } else {
+    Serial1.println("Waypoints เต็มแล้ว");
+  }    
+}
+
+void setWaypointLoops(int loops) {
+  if (loops > 0) {
+    waypoint_loops = loops;
+    Serial1.print("ตั้งจำนวนรอบ Loop เป็น ");
+    Serial1.println(waypoint_loops);
+  } else {
+    waypoint_loops = 1;
+    Serial1.println("รีเซ็ตจำนวนรอบ Loop ");
+  }
+}
+
+void AddWaypoint(String latlon) {
+  latlon.trim();
+  if (wpCount < MAX_WAYPOINTS) {
+    int commaIndex = latlon.indexOf(',');
+    if (commaIndex > 0) {
+      String latStr = latlon.substring(0, commaIndex);
+      String lonStr = latlon.substring(commaIndex +1);
+      latStr.trim();
+      lonStr.trim();
+      double lat = latStr.toFloat();
+      double lon = lonStr.toFloat();
+      WP_LATarray[wpCount] = lat;
+      WP_LONarray[wpCount] = lon;
+      wpCount++;
+      Serial1.print("เพิ่ม Waypoint จากมือถือ: ");
+      Serial1.print(lat, 6);
+      Serial1.print(", ");
+      Serial1.println(lon, 6);
+    } else {
+      Serial1.println("รูปแบบพิกัดผิด (ไม่มี ,)");
+    }
+  } else {
+    Serial1.println("Waypoints เต็มแล้ว");
+  }
+}
+
+void clearWaypoints(){
+  memset(WP_LATarray, 0, sizeof(WP_LATarray));
+  memset(WP_LONarray, 0, sizeof(WP_LONarray));
+  wpCount = 0;
+  current_wp = 0;
+  Serial1.print("ล้างค่าพิกัด GPS");
+}
+
+void getCompass() {
+  compass.read();
+  int x = compass.getX();
+  int y = compass.getY();
+  int z = compass.getZ();
+  int azimuth = compass.getAzimuth();
+  if (azimuth < 0) azimuth += 360;
+  int offset = 13;
+  compass_heading = (azimuth - offset + 360) % 360;
+}
+
+void setHeading() {
+  int sum = 0;
+  int n = 6;
+  for (int i = 0; i < n; i++) {
+    getCompass();
+    sum += compass_heading;
+    delay(50);
+  }
+  desired_heading = sum / n;
+  Heading_A = desired_heading;
+  Heading_B = (desired_heading + 180) % 360;
+}
+ 
+void gpsInfo() {
+  Number_of_SATS = gps.satellites.value();
+  if (gps.location.isValid()) {
+    Distance_To_WP = TinyGPSPlus::distanceBetween(
+      gps.location.lat(), gps.location.lng(),
+      WP_LATarray[current_wp], WP_LONarray[current_wp]);
+    Serial1.print("Lat:");
+    Serial1.print(gps.location.lat(), 6);
+    Serial1.print(" Lon:");
+    Serial1.println(gps.location.lng(), 6);
+    Serial1.print("ดาวเทียม ");
+    Serial1.print(Number_of_SATS);
+    Serial1.print(" ดวง ");
+  } else {
+    Serial1.println("ไม่มีข้อมูลพิกัด GPS");
+  }
+}
+
+void goWaypoint() {
+  Serial1.println("ไปยัง Waypoint");
+  for (int loop = 0; loop < waypoint_loops; loop++) {
+    current_wp = 0;
+  while (current_wp < wpCount) {
+    bluetooth();
+    if (blueToothVal == 5) { break; }
+    getCompass();
+    getGPS();
+
+    double Distance_To_WP = TinyGPSPlus::distanceBetween(
+      gps.location.lat(), gps.location.lng(),
+      WP_LATarray[current_wp], WP_LONarray[current_wp]);
+
+    double bearing = TinyGPSPlus::courseTo(
+      gps.location.lat(), gps.location.lng(),
+      WP_LATarray[current_wp], WP_LONarray[current_wp]);
+
+    double delta = bearing - compass_heading;
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+
+    if (Distance_To_WP < 0.1) {
+      StopCar();
+      Serial1.println("ถึงพิกัดแล้ว");
+      current_wp++;
+      delay(1000);
+      continue;
+    }
+
+    if (abs(delta) <= 5) {
+      Forward();
+    } else {
+      StopCar();
+      while (abs(delta) > 5) {
+        getCompass();
+        bearing = TinyGPSPlus::courseTo(
+          gps.location.lat(), gps.location.lng(),
+          WP_LATarray[current_wp], WP_LONarray[current_wp]);
+        delta = bearing - compass_heading;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        if (delta > 0) { SlowRightTurn(); }
+        else { SlowLeftTurn();}
+        delay(50);
+      }
+      StopCar();
+      Forward();
+   }
+  }
+  if (blueToothVal == 5) break;
+  Serial1.print("จบรอบที่ ");
+  Serial1.println(loop + 1);
+  delay(1000);
+ }
+}
+
+void Forward() {
+  motor1.setSpeed(mtr_Spd);
+  motor2.setSpeed(mtr_Spd);
+  motor3.setSpeed(mtr_Spd);
+  motor4.setSpeed(mtr_Spd);
+  motor1.run(FORWARD);
+  motor2.run(FORWARD);
+  motor3.run(FORWARD);
+  motor4.run(FORWARD);
+}
+
+void Backward() {
+  motor1.setSpeed(mtr_Spd);
+  motor2.setSpeed(mtr_Spd);
+  motor3.setSpeed(mtr_Spd);
+  motor4.setSpeed(mtr_Spd);
+  motor1.run(BACKWARD);
+  motor2.run(BACKWARD);
+  motor3.run(BACKWARD);
+  motor4.run(BACKWARD);
+}
+
+void LeftTurn() {
+  motor1.setSpeed(mtr_Spd);
+  motor2.setSpeed(mtr_Spd);
+  motor3.setSpeed(mtr_Spd);
+  motor4.setSpeed(mtr_Spd);
+  motor1.run(BACKWARD);
+  motor2.run(FORWARD);
+  motor3.run(FORWARD);
+  motor4.run(BACKWARD);
+}
+
+void RightTurn() {
+  motor1.setSpeed(mtr_Spd);
+  motor2.setSpeed(mtr_Spd);
+  motor3.setSpeed(mtr_Spd);
+  motor4.setSpeed(mtr_Spd);
+  motor1.run(FORWARD);
+  motor2.run(BACKWARD);
+  motor3.run(BACKWARD);
+  motor4.run(FORWARD);
+}
+
+void SlowLeftTurn() {
+  motor1.setSpeed(turn_Speed);
+  motor2.setSpeed(turn_Speed);
+  motor3.setSpeed(turn_Speed);
+  motor4.setSpeed(turn_Speed);
+  motor1.run(BACKWARD);
+  motor2.run(FORWARD);
+  motor3.run(FORWARD);
+  motor4.run(BACKWARD);
+}
+
+void SlowRightTurn() {
+  motor1.setSpeed(turn_Speed);
+  motor2.setSpeed(turn_Speed);
+  motor3.setSpeed(turn_Speed);
+  motor4.setSpeed(turn_Speed);
+  motor1.run(FORWARD);
+  motor2.run(BACKWARD);
+  motor3.run(BACKWARD);
+  motor4.run(FORWARD);
+}
+
+void StopCar() {
+  motor1.run(RELEASE);
+  motor2.run(RELEASE);
+  motor3.run(RELEASE);
+  motor4.run(RELEASE);
+}
+
+void CompassTurnRight() {
+  StopCar();
+  getCompass();
+  desired_heading = (compass_heading + 90) % 360;
+  unsigned long startTime = millis();
+
+  while (abs(angleDiff(desired_heading, compass_heading)) > compass_dev) {
+    if (millis() - startTime > 5000) break;
+    getCompass();
+    bluetooth();
+    if (blueToothVal == 5) break;
+    int diff = angleDiff(desired_heading, compass_heading);
+    if (diff > 0) {
+      SlowRightTurn();
+    } else {
+      SlowLeftTurn();
+    }
+  }
+  StopCar();
+}
+
+void CompassTurnLeft() {
+  StopCar();
+  getCompass();
+  desired_heading = (compass_heading - 90 + 360) % 360;
+  unsigned long startTime = millis();
+
+  while (abs(angleDiff(desired_heading, compass_heading)) > compass_dev) {
+    if (millis() - startTime > 5000) break;
+    getCompass();
+    bluetooth();
+    if (blueToothVal == 5) break;
+    int diff = angleDiff(desired_heading, compass_heading);
+    if (diff > 0) {
+      SlowRightTurn();
+    } else {
+      SlowLeftTurn();
+    }
+  }
+  StopCar();
+}
+
+void turnAround() {
+  if (pass == 0) {
+    CompassTurnRight();
+  } else {
+    CompassTurnLeft();
+  }
+  StopCar();
+  if (pass == 0) {
+    CompassTurnRight();
+    pass = 1 ;
+  } else {
+    if (desired_heading == Heading_A) {
+      desired_heading = Heading_B;
+    } else if (desired_heading == Heading_B) {
+      desired_heading = Heading_A;
+    }
+    CompassTurnLeft();
+    pass = 0;
+  }                                         
+}
+
+void loop() {
+  bluetooth();
+  getGPS();
+  getCompass();
+
+  int sats = gps.satellites.value();
+
+  // คำนวณ bearing เฉพาะเมื่อมี Waypoint และ GPS fix แล้ว (GPS fix คือ จับสัญญาณดาวเทียมได้ 3 ดวงขึ้นไป เพื่อความแม่นยำ)
+  if (gps.location.isValid() && wpCount > 0) {
+    double bearing = TinyGPSPlus::courseTo(
+      gps.location.lat(), gps.location.lng(),
+      WP_LATarray[current_wp], WP_LONarray[current_wp]);
+    double delta = bearing - compass_heading;
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+    Serial.print("Bearing: ");
+    Serial.print(bearing);
+    Serial.print(" | Compass_heading: ");
+    Serial.print(compass_heading);
+    Serial.print(" | Delta: ");
+    Serial.println(delta);
+  } else {
+    Serial.println("Bearing/Delta: --- (GPS ยังไม่ FIX ค่า หรือ ยังไม่มีพิกัด Waypoint)");
+  }
+  Serial.print("จับจำนวนดาวเทียมได้: ");
+  Serial.print(sats);
+  Serial.println(" ดวง");
+  if (gps.location.isValid()) {
+    Serial.print("Position ปัจจุบัน: ");
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(", ");
+    Serial.println(gps.location.lng(), 6);
+    Serial.println("");
+  } else {
+    Serial.println("รอสัญญาณ GPS");
+    Serial.println("");
+  }
+  delay(200);
+}
